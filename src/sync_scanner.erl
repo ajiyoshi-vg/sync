@@ -160,7 +160,7 @@ handle_cast(discover_src_dirs, State) ->
         {ok, {replace, DirsAndOpts}} ->
             discover_source_dirs(State, [], dirs(DirsAndOpts))
     end,
-    log_debug(discover_src_files, From),
+    log_debug(discover_src_dirs, From),
     Ret;
 
 handle_cast(discover_src_files, State) ->
