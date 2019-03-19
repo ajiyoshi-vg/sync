@@ -11,7 +11,8 @@
     growl_warnings/1,
     log_success/1,
     log_errors/1,
-    log_warnings/1
+    log_warnings/1,
+    log_debug/1
 ]).
 
 startup(Growl) ->
@@ -49,6 +50,10 @@ log_errors(Message) ->
 
 log_warnings(Message) ->
     can_we_log(warnings)
+        andalso error_logger:warning_msg(lists:flatten(Message)).
+
+log_debug(Message) ->
+    can_debug_log()
         andalso error_logger:warning_msg(lists:flatten(Message)).
 
 %%% PRIVATE FUNCTIONS %%%
@@ -134,6 +139,12 @@ can_we_growl(MsgType) ->
 
 can_we_log(MsgType) ->
     can_we_notify(log, MsgType).
+
+can_debug_log() ->
+    case sync_utils:get_env(log, []) of
+        L when is_list(L) -> lists:member(debug, L);
+        _                 -> false
+    end.
 
 can_we_notify(GrowlOrLog,MsgType) ->
     case sync_utils:get_env(GrowlOrLog, all) of
