@@ -801,5 +801,5 @@ elapsed(From) ->
     erlang:monotonic_time(milli_seconds) - From.
 
 log_debug(Msg, From) ->
-    sync_notify:log_debug(io_lib:format("~p msec to ~p~n", [elapsed(From), Msg])).
+    sync_notify:log_debug(io_lib:format("~p msec to ~p", [elapsed(From), Msg])).
 
