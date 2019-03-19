@@ -368,3 +368,38 @@ get_system_modules() ->
         end
     end,
     lists:flatten([F(X) || X <- Apps]).
+
+modified_and_removed(Old, New) ->
+    modified_and_removed(Old, New, {[], []}).
+
+modified_and_removed([{File, LastMod}|T1], [{File, LastMod}|T2], Acc) ->
+    %% File hasn't changed, do nothing...
+    modified_and_removed(T1, T2, Acc);
+modified_and_removed([{File, LastMod}|T1], [{File, _}|T2], {Modified, Removed}) ->
+    %% File has changed, recompile...
+    NewMod = [{File, LastMod}|Modified],
+    modified_and_removed(T1, T2, {NewMod, Removed});
+modified_and_removed([{File1, LastMod1}|T1], [{File2, _}|_]=T2, {Modified, Removed}) ->
+    %% Lists are different...
+    case File1 < File2 of
+        true ->
+            %% File1 was removed, do nothing...
+            NewRem = [{File1, LastMod1}|Removed],
+            modified_and_removed(T1, T2, {Modified, NewRem});
+        false ->
+            %% File is new
+            NewMod = [{File1, LastMod1}|Modified],
+            modified_and_removed(T1, T2, {NewMod, Removed})
+    end;
+modified_and_removed([], [{File, LastMod}|T2], {Modified, Removed}) ->
+    %% File is new
+    NewMod = [{File, LastMod}|Modified],
+    modified_and_removed([], T2, {NewMod, Removed});
+modified_and_removed([{File, LastMod}|T1], [], {Modified, Removed}) ->
+    %% Rest of file(s) removed
+    NewRem = [{File, LastMod}|Removed],
+    modified_and_removed(T1, [], {Modified, NewRem});
+modified_and_removed([], [], Acc) ->
+    Acc.
+
+

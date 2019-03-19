@@ -44,6 +44,7 @@
     beam_lastmod = undefined :: [{module(), timestamp()}] | undefined,
     src_file_lastmod = [] :: [{file:filename(), timestamp()}],
     hrl_file_lastmod = [] :: [{file:filename(), timestamp()}],
+    src_hrl_table = [] :: [{file:filename(), file:filename()}],
     timers = [],
     patching = false,
     paused = false
@@ -213,13 +214,16 @@ handle_cast(compare_src_files, State) ->
     NewSrcFileLastMod = lists:usort([F(X) || X <- State#state.src_files]),
 
     %% Compare to previous results, if there are changes, then recompile the file...
-    process_src_file_lastmod(State#state.src_file_lastmod, NewSrcFileLastMod, State#state.patching),
+    {Modified, _} = sync_utils:modified_and_removed(State#state.src_file_lastmod, NewSrcFileLastMod),
+    on_source_changed(Modified, State#state.patching),
 
     %% Schedule the next interval...
     NewTimers = schedule_cast(compare_src_files, 1000, State#state.timers),
 
+    NewTable = update_table(Modified, State#state.src_hrl_table),
+
     %% Return with updated src_file lastmod...
-    NewState = State#state { src_file_lastmod=NewSrcFileLastMod, timers=NewTimers },
+    NewState = State#state { src_file_lastmod=NewSrcFileLastMod, timers=NewTimers, src_hrl_table=NewTable },
     {noreply, NewState};
 
 handle_cast(compare_hrl_files, State) ->
@@ -230,8 +234,13 @@ handle_cast(compare_hrl_files, State) ->
     end,
     NewHrlFileLastMod = lists:usort([F(X) || X <- State#state.hrl_files]),
 
+    IncludeTable = reverse_table(State#state.src_hrl_table),
+
     %% Compare to previous results, if there are changes, then recompile src files that depends
-    process_hrl_file_lastmod(State#state.hrl_file_lastmod, NewHrlFileLastMod, State#state.src_files, State#state.patching),
+    {Modified, Removed} = sync_utils:modified_and_removed(State#state.hrl_file_lastmod, NewHrlFileLastMod),
+
+    on_header_changed(Modified, IncludeTable, State#state.patching),
+    on_header_removed(Removed, IncludeTable),
 
     %% Schedule the next interval...
     NewTimers = schedule_cast(compare_hrl_files, 2000, State#state.timers),
@@ -244,6 +253,8 @@ handle_cast(info, State) ->
     io:format("Modules: ~p~n", [State#state.modules]),
     io:format("Source Dirs: ~p~n", [State#state.src_dirs]),
     io:format("Source Files: ~p~n", [State#state.src_files]),
+    io:format("Header Files: ~p~n", [State#state.hrl_files]),
+    io:format("Header Include Table: ~p~n", [State#state.src_hrl_table]),
     {noreply, State};
 
 handle_cast(enable_patching, State) ->
@@ -410,33 +421,12 @@ load_module_on_all_nodes(Module) ->
     [F(X) || X <- Nodes],
     {ok, NumNodes}.
 
-process_src_file_lastmod([{File, LastMod}|T1], [{File, LastMod}|T2], EnablePatching) ->
-    %% Beam hasn't changed, do nothing...
-    process_src_file_lastmod(T1, T2, EnablePatching);
-process_src_file_lastmod([{File, _}|T1], [{File, _}|T2], EnablePatching) ->
-    %% File has changed, recompile...
-    recompile_src_file(File, EnablePatching),
-    process_src_file_lastmod(T1, T2, EnablePatching);
-process_src_file_lastmod([{File1, LastMod1}|T1], [{File2, LastMod2}|T2], EnablePatching) ->
-    %% Lists are different...
-    case File1 < File2 of
-        true ->
-            %% File was removed, do nothing...
-            process_src_file_lastmod(T1, [{File2, LastMod2}|T2], EnablePatching);
-        false ->
-            maybe_recompile_src_file(File2, LastMod2, EnablePatching),
-            process_src_file_lastmod([{File1, LastMod1}|T1], T2, EnablePatching)
-    end;
-process_src_file_lastmod([], [{File, LastMod}|T2], EnablePatching) ->
-    maybe_recompile_src_file(File, LastMod, EnablePatching),
-    process_src_file_lastmod([], T2, EnablePatching);
-process_src_file_lastmod(_A, [], _) ->
-    %% All remaining files, if any, were removed.
-    ok;
-process_src_file_lastmod(undefined, _Other, _) ->
-    %% First load, do nothing.
-    ok.
 
+on_source_changed(Modified, EnablePatching) ->
+    F = fun({File, LastMod}) ->
+            maybe_recompile_src_file(File, LastMod, EnablePatching)
+        end,
+    lists:foreach(F, Modified).
 
 erlydtl_compile(SrcFile, Options) ->
     F = fun({outdir, OutDir}, Acc) -> [{out_dir, OutDir} | Acc];
@@ -633,45 +623,21 @@ growl_format_errors(Errors, Warnings) ->
     end,
     [F(X) || X <- Everything].
 
-process_hrl_file_lastmod([{File, LastMod}|T1], [{File, LastMod}|T2], SrcFiles, Patching) ->
-    %% Hrl hasn't changed, do nothing...
-    process_hrl_file_lastmod(T1, T2, SrcFiles, Patching);
-process_hrl_file_lastmod([{File, _}|T1], [{File, _}|T2], SrcFiles, Patching) ->
-    %% File has changed, recompile...
-    WhoInclude = who_include(File, SrcFiles),
-    [recompile_src_file(SrcFile, Patching) || SrcFile <- WhoInclude],
-    process_hrl_file_lastmod(T1, T2, SrcFiles, Patching);
-process_hrl_file_lastmod([{File1, LastMod1}|T1], [{File2, LastMod2}|T2], SrcFiles, Patching) ->
-    %% Lists are different...
-    case File1 < File2 of
-        true ->
-            %% File was removed, do nothing...
-            warn_deleted_hrl_files(File1, SrcFiles),
-            process_hrl_file_lastmod(T1, [{File2, LastMod2}|T2], SrcFiles, Patching);
-        false ->
-            %% File is new, look for src that include it
-            WhoInclude = who_include(File2, SrcFiles),
-            [maybe_recompile_src_file(SrcFile, LastMod2, Patching) || SrcFile <- WhoInclude],
-            process_hrl_file_lastmod([{File1, LastMod1}|T1], T2, SrcFiles, Patching)
-    end;
-process_hrl_file_lastmod([], [{File, LastMod}|T2], SrcFiles, Patching) ->
-    %% File is new, look for src that include it
-    WhoInclude = who_include(File, SrcFiles),
-    [maybe_recompile_src_file(SrcFile, LastMod, Patching) || SrcFile <- WhoInclude],
-    process_hrl_file_lastmod([], T2, SrcFiles, Patching);
-process_hrl_file_lastmod([{File1, _LastMod1}|T1], [], SrcFiles, Patching) ->
-    %% Rest of file(s) removed, warn and process next
-    warn_deleted_hrl_files(File1, SrcFiles),
-    process_hrl_file_lastmod(T1, [], SrcFiles, Patching);
-process_hrl_file_lastmod([], [], _, _) ->
-    %% Done
-    ok;
-process_hrl_file_lastmod(undefined, _Other, _,  _) ->
-    %% First load, do nothing
-    ok.
+on_header_changed(Modified, IncludeTable, Patching) ->
+    F = fun({HrlFile, _}) ->
+            WhoInclude = who_include(HrlFile, IncludeTable),
+            [recompile_src_file(SrcFile, Patching) || SrcFile <- WhoInclude]
+        end,
+    lists:foreach(F, Modified).
 
-warn_deleted_hrl_files(HrlFile, SrcFiles) ->
-    WhoInclude = who_include(HrlFile, SrcFiles),
+on_header_removed(Removed, IncludeTable) ->
+    W = fun({HrlFile, _}) ->
+            warn_deleted_hrl_files(HrlFile, IncludeTable)
+        end,
+    lists:foreach(W, Removed).
+
+warn_deleted_hrl_files(HrlFile, IncludeTable) ->
+    WhoInclude = who_include(HrlFile, IncludeTable),
     case WhoInclude of
         [] -> ok;
         _ -> io:format(
@@ -679,24 +645,34 @@ warn_deleted_hrl_files(HrlFile, SrcFiles) ->
                 [filename:basename(HrlFile), lists:map(fun(File) -> filename:basename(File) end, WhoInclude)])
     end.
 
-who_include(HrlFile, SrcFiles) ->
+who_include(HrlFile, IncludeTable) ->
     HrlFileBaseName = filename:basename(HrlFile),
-    Pred = fun(SrcFile) ->
-        {ok, Forms} = epp_dodger:parse_file(SrcFile),
-        is_include(HrlFileBaseName, Forms)
-        end,
-    lists:filter(Pred, SrcFiles).
+    proplists:get_all_values(HrlFileBaseName, IncludeTable).
 
-is_include(_HrlFile, []) ->
-    false;
-is_include(HrlFile, [{tree, attribute, _, {attribute, _, [{_, _, IncludeFile}]}} | Forms]) when is_list(IncludeFile) ->
+reverse_table(IncludeTable) ->
+    [ {Hrl, Src} || {Src, Hrl} <- IncludeTable ].
+
+update_table(SrcFiles, IncludeTable) ->
+    F = fun({SrcFile, _}, Acc) ->
+            Cleared = proplists:delete(SrcFile, Acc),
+            source_with_header(SrcFile) ++ Cleared
+        end,
+    lists:foldl(F, IncludeTable, SrcFiles).
+
+source_with_header(SrcFile) ->
+    {ok, Forms} = epp_dodger:parse_file(SrcFile),
+    [ {SrcFile, Header} || Header <- headers(Forms) ].
+
+headers(Forms) ->
+    headers([], Forms).
+
+headers(HrlFiles, []) ->
+    HrlFiles;
+headers(HrlFiles, [{tree, attribute, _, {attribute, _, [{_, _, IncludeFile}]}} | Forms]) when is_list(IncludeFile) ->
     IncludeFileBaseName = filename:basename(IncludeFile),
-    case IncludeFileBaseName of
-        HrlFile -> true;
-        _ -> is_include(HrlFile, Forms)
-    end;
-is_include(HrlFile, [_SomeForm | Forms]) ->
-    is_include(HrlFile, Forms).
+    headers([IncludeFileBaseName|HrlFiles], Forms);
+headers(HrlFiles, [_SomeForm | Forms]) ->
+    headers(HrlFiles, Forms).
 
 %% @private Filter the modules to be scanned.
 filter_modules_to_scan(Modules) ->
