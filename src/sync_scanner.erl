@@ -132,6 +132,8 @@ handle_cast(_, State) when State#state.paused==true ->
     %% If paused, just absorb the request and do nothing
     {noreply, State};
 handle_cast(discover_modules, State) ->
+    From = from(),
+
     %% Get a list of all loaded non-system modules.
     Modules = (erlang:loaded() -- sync_utils:get_system_modules()),
 
@@ -141,21 +143,28 @@ handle_cast(discover_modules, State) ->
     %% Schedule the next interval...
     NewTimers = schedule_cast(discover_modules, 30000, State#state.timers),
 
+    log_debug(discover_modules, From),
+
     %% Return with updated modules...
     NewState = State#state { modules=FilteredModules, timers=NewTimers },
     {noreply, NewState};
 
 handle_cast(discover_src_dirs, State) ->
-    case application:get_env(sync, src_dirs) of
+    From = from(),
+    Ret = case application:get_env(sync, src_dirs) of
         undefined ->
             discover_source_dirs(State, [], []);
         {ok, {add, DirsAndOpts}} ->
             discover_source_dirs(State, dirs(DirsAndOpts), []);
         {ok, {replace, DirsAndOpts}} ->
             discover_source_dirs(State, [], dirs(DirsAndOpts))
-    end;
+    end,
+    log_debug(discover_src_files, From),
+    Ret;
 
 handle_cast(discover_src_files, State) ->
+    From = from(),
+
     %% For each source dir, get a list of source files...
     F = fun(X, Acc) ->
         sync_utils:wildcard(X, ".*\\.(erl|dtl|lfe|ex)$") ++ Acc
@@ -171,11 +180,15 @@ handle_cast(discover_src_files, State) ->
     %% Schedule the next interval...
     NewTimers = schedule_cast(discover_src_files, 5000, State#state.timers),
 
+    log_debug(discover_src_files, From),
+
     %% Return with updated files...
     NewState = State#state { src_files=ErlFiles, hrl_files=HrlFiles, timers=NewTimers },
     {noreply, NewState};
 
 handle_cast(compare_beams, State) ->
+    From = from(),
+
     %% Create a list of beam file lastmod times, but filter out modules not having 
     %% a valid beam file reference.
     F = fun(X) ->
@@ -200,11 +213,15 @@ handle_cast(compare_beams, State) ->
     %% Schedule the next interval...
     NewTimers = schedule_cast(compare_beams, 2000, State#state.timers),
 
+    log_debug(compare_beams, From),
+
     %% Return with updated beam lastmod...
     NewState = State#state { beam_lastmod=NewBeamLastMod, timers=NewTimers },
     {noreply, NewState};
 
 handle_cast(compare_src_files, State) ->
+    From = from(),
+
     %% Create a list of file lastmod times...
     F = fun(X) ->
         LastMod = filelib:last_modified(X),
@@ -218,11 +235,15 @@ handle_cast(compare_src_files, State) ->
     %% Schedule the next interval...
     NewTimers = schedule_cast(compare_src_files, 1000, State#state.timers),
 
+    log_debug(compare_src_files, From),
+
     %% Return with updated src_file lastmod...
     NewState = State#state { src_file_lastmod=NewSrcFileLastMod, timers=NewTimers },
     {noreply, NewState};
 
 handle_cast(compare_hrl_files, State) ->
+    From = from(),
+
     %% Create a list of file lastmod times...
     F = fun(X) ->
         LastMod = filelib:last_modified(X),
@@ -235,6 +256,8 @@ handle_cast(compare_hrl_files, State) ->
 
     %% Schedule the next interval...
     NewTimers = schedule_cast(compare_hrl_files, 2000, State#state.timers),
+
+    log_debug(compare_hrl_files, From),
 
     %% Return with updated hrl_file lastmod...
     NewState = State#state { hrl_file_lastmod=NewHrlFileLastMod, timers=NewTimers },
@@ -794,3 +817,13 @@ is_replace_dir(SrcDir, ReplaceDirs) ->
             case re:run(SrcDir, Dir) of nomatch -> false; _ -> true end;
         (_, Acc) -> Acc
     end, false, ReplaceDirs).
+
+from() ->
+    erlang:monotonic_time(milli_seconds).
+
+elapsed(From) ->
+    erlang:monotonic_time(milli_seconds) - From.
+
+log_debug(Msg, From) ->
+    sync_notify:log_debug(io_lib:format("~p msec to ~p~n", [elapsed(From), Msg])).
+
